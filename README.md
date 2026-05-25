@@ -54,7 +54,7 @@ Este laboratório demonstra como orquestrar um pipeline IA ponta-a-ponta em um c
 | **Throughput** | 20.93 tokens/s | 20.45 tokens/s | **-2.3%** |
 | **Arquitetura** | Self-Attention tradicional | KV Cache + SDPA | Otimizado |
 
-> **Nota:** Métricas reais em GPU Tesla T4. Neste ambiente, `bitsandbytes` e `flash-attn` não estavam disponíveis, então o modelo foi carregado em fp32 e a atenção ficou em `sdpa`. O contexto foi gerado com 10.727 tokens e truncado para 2.048 tokens na geração por limite do modelo.
+> **Nota:** Métricas reais em GPU 5060TI. Neste ambiente, `bitsandbytes` e `flash-attn` não estavam disponíveis, então o modelo foi carregado em fp32 e a atenção ficou em `sdpa`. O contexto foi gerado com 10.727 tokens e truncado para 2.048 tokens na geração por limite do modelo.
 
 ---
 
