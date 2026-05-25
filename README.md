@@ -1,6 +1,6 @@
 # Pipeline Integrador: QLoRA + RAG Massivo + Otimização de Inferência na GPU
 
-**Declaração de Conformidade com IA:** Partes deste laboratório foram geradas/complementadas com IA, revisadas e validadas por [Seu Nome]
+**Declaração de Conformidade com IA:** Partes deste laboratório foram geradas/complementadas com IA, revisadas e validadas por Wendril Gabriel
 
 ---
 
@@ -25,7 +25,7 @@ Este laboratório demonstra como orquestrar um pipeline IA ponta-a-ponta em um c
    - Mantém qualidade via NF4 (Normal Float 4-bit)
 
 2. **RAG Massivo (Contexto Simulado)**
-   - 4 capítulos de manual médico fictício
+   - 5 capítulos de manual médico fictício
    - ~10-15K tokens comprimindo múltiplas disciplinas
    - Representa cenário real de recuperação via banco vetorial
 
@@ -47,70 +47,26 @@ Este laboratório demonstra como orquestrar um pipeline IA ponta-a-ponta em um c
 
 | Aspecto | Baseline (cache=False) | Otimizado (cache=True + FA2) | Melhoria |
 |--------|----------------------|------------------------------|---------|
-| **Tempo Total** | ~2.5s | ~0.4s | **6.25x mais rápido** |
-| **Pico VRAM** | ~4800 MB | ~2400 MB | **50% menos memória** |
-| **Throughput** | 40 tokens/s | 250 tokens/s | **6.25x** |
-| **Arquitetura** | Self-Attention tradicional | FlashAttention-2 + KV Cache | Otimizado |
+| **Tempo Total** | 17.141s | 15.283s | **1.12x mais rápido** |
+| **Pico VRAM** | 6124.93 MB | 10415.22 MB | **-70.0% (aumentou)** |
+| **Throughput** | 5.83 tokens/s | 6.54 tokens/s | **+12.2%** |
+| **Arquitetura** | Self-Attention tradicional | KV Cache + SDPA | Otimizado |
 
-> **Nota:** Valores indicativos baseados em TinyLlama-1.1B. Resultados variam conforme GPU e tamanho do modelo.
-
----
-
-## Critérios de Sucesso Atingidos
-
-- [x] Modelo carrega com QLoRA 4-bit (VRAM < 2GB)
-- [x] Baseline executa com cache=False (mesmo que lento)
-- [x] Otimizado executa 5-10x mais rápido
-- [x] Pico VRAM reduz significativamente (50%+)
-- [x] README explica corretamente a arquitetura
-- [x] Declaração de IA incluída
+> **Nota:** Métricas reais em GPU Tesla T4. Neste ambiente, `bitsandbytes` e `flash-attn` não estavam disponíveis, então o modelo foi carregado em fp32 e a atenção ficou em `sdpa`.
 
 ---
+
+
 
 ## Análise Técnica Profunda
 
 ### PARTE A: Como QLoRA + KV Cache + FlashAttention-2 Salvaram o Transformer
 
-A complexidade O(n²) do Self-Attention tradicional prova ser um gargalo intransponível ao processar contextos massivos. Durante a geração autoregressiva, o modelo recalcula as matrizes Query, Key e Value para **toda sequência** a cada novo token, resultando em operações quadráticas crescentes (token 1 recalcula 1x, token 2 recalcula 2x, ..., token 100 recalcula 100x). Esse comportamento exaure a VRAM em minutos.
-
-A solução arquitetural combina três técnicas complementares:
-
-1. **Quantização QLoRA 4-bit** (Unidade II): Reduz o footprint inicial do modelo de ~4.4GB (Float32) para ~1.1GB (4-bit NF4), liberando até 75% de VRAM no carregamento. Essas economias são críticas pois toda VRAM restante será consumida durante o forward pass.
-
-2. **KV Cache (Caching de Chaves/Valores)** (Software Optimization): Durante a geração, reutiliza as matrizes K e V dos tokens anteriores em vez de recalculá-las. Em vez de processar a sequência inteira repetidamente, o modelo só computa o novo token contra o cache. Isso reduz a complexidade de O(n²) para O(n·m) onde m é fixo (tamanho da head dimension), transformando cada step em O(1) amortizado.
-
-3. **FlashAttention-2** (Hardware Optimization, Unidade I): Explora a hierarquia de memória da GPU (VRAM → Cache → SRAM local) para minimizar latência de acesso. Em vez de carregar matrizes inteiras para VRAM antes de computar (padrão O(n) leituras/escritas), FA-2 bloqueia as operações para operar em SRAM ultrarrápida, reduzindo I/O em ~10x. Combinado com KV Cache, torna a inferência viável: o gargalo de memória muda de O(n²) para O(n·m·log(n)) com coeficientes muito menores.
-
-**Resultado:** Um prompt de 15K tokens que causava OOM agora roda confortavelmente, gerando 100 tokens adicionais em <500ms com VRAM estável ~2.5GB.
+O Self-Attention tradicional sofre com complexidade $O(n^2)$ porque recalcula Q, K e V para toda a sequência a cada novo token, o que explode a VRAM e o tempo quando o contexto cresce. A combinação de QLoRA (reduz o footprint do modelo para 4-bit), KV Cache (reutiliza K e V já computados) e FlashAttention-2 (reduz I/O ao operar em blocos na SRAM da GPU) desloca o gargalo de memória para operações muito menores e torna a geração em contextos longos viável. Neste ambiente específico, o modelo foi carregado em fp32 e a atenção ficou em `sdpa` por indisponibilidade de `bitsandbytes` e `flash-attn`, mas o ganho de cache ainda reduz o recálculo redundante, mantendo o pipeline executável com 10–15k tokens de contexto.
 
 ### PARTE B: Por Que Falharia com 2 Milhões de Tokens e a Transição para Mamba
 
-Embora nossas otimizações reduzam a complexidade de O(n²) para O(n), a **dependência linear em n permanece**. Se o cliente exigisse processar 2 milhões de tokens:
-
-- **KV Cache sozinho exploderia:** Com m=64 (head dim) e cabeçalhos múltiplos, o cache de K,V = 2M × 64 × num_heads × 2 (float16) = ~16GB apenas em cache, inviável em GPUs convencionais.
-- **FlashAttention-2 teria throughput limitado:** Mesmo com SRAM eficiente, processar 2M tokens sequencialmente leva minutos, inadequado para aplicações online.
-- **Remodelamento físico necessário:** O Self-Attention, por sua natureza teórica, não pode ser escalado linearly sem transformação arquitetural.
-
-**Solução: State Space Models (SSMs) como Mamba**
-
-A arquitetura Mamba (Zhou et al., 2023) substitui o Self-Attention por um mecanismo de **estado discreto latente** com complexidade **O(n)** espaço/tempo:
-
-```
-h_t = A·h_{t-1} + B·x_t           (estado latente escalar/pequeno)
-y_t = C·h_t                        (output linear)
-```
-
-Propriedades decisivas:
-
-1. **Complexidade O(1) em memória:** Estado latente (ex: 256 dims) é **constante** independente de n. Pode processar 2M tokens com VRAM ~1GB (vs 16GB para KV Cache Transformer).
-
-2. **Throughput O(n):** Processamento paralelo eficiente via SSM kernels. Enquanto Transformer é fundamentally sequential por depender de todos os tokens anteriores, SSM apenas mantém estado compacto.
-
-3. **Recência vs Globabilidade:** SSM perde contexto distante (janela efetiva ~1-2K tokens), compensado por ler documentos completos em múltiplos passes vs single pass.
-
-4. **Trade-off Adequado para RAG:** Em RAG, não precisamos de "atenção global" aos 2M tokens. Fazemos retrieval inteligente (top-k chunks), passamos para o modelo. Mamba excele neste cenário: processa 100K tokens recuperados rapidamente vs Transformer travando.
-
-**Conclusão:** A indústria migra para SSMs/Mamba em cenários de contexto ultra-longo porque mantêm qualidade com scaling linear, enquanto Self-Attention é fundamentalmente limitado a ~100K tokens práticos em hardware atual (VRAM). RAG + Mamba é a arquitetura padrão pós-2024 para LLMs de produção em escala.
+Mesmo com essas otimizações, a dependência linear em $n$ permanece: o KV Cache cresce proporcionalmente ao número de tokens e se torna inviável em dezenas de bilhões de elementos para 2 milhões de tokens, além do throughput cair pela necessidade de processar uma sequência gigantesca. Por isso, a indústria precisa migrar para State Space Models (SSMs) como Mamba, que mantêm um estado latente compacto e memória $O(1)$, permitindo escalar para contextos ultra-longos sem estourar VRAM. Em cenários de RAG extremo, a arquitetura SSM entrega previsibilidade de memória e latência, enquanto o Transformer tradicional fica limitado a janelas práticas muito menores.
 
 ---
 
@@ -136,16 +92,6 @@ python lab_pipeline.py
 
 ---
 
-## Extensões Futuras
-
-1. **Fine-tuning com LoRA:** Adaptar modelo para jargão médico específico
-2. **Integração com RAG real:** Conectar a banco vetorial (Pinecone/Weaviate)
-3. **Quantização INT8 vs INT4:** Benchmark trade-off qualidade/velocidade
-4. **Teste com Mamba-2:** Replicar pipeline com SSM para comparação
-5. **Deployment em produção:** FastAPI + vLLM para serving
-
----
-
 ## Referências
 
 - **FlashAttention:** Dao et al. (2022) - Hardware-aware Attention
@@ -161,10 +107,7 @@ Este laboratório demonstra que **Transformers tradicionais podem ser viabilizad
 
 **Transformers (0-100K tokens) → Mamba (100K-2M tokens) → Retrieval híbrido (2M+ tokens)**
 
-Vocês agora entendem toda a cadeia teórica e prática dessa evolução.
-
 ---
 
 **Versão:** v1.0  
-**Data:** Maio 2025  
-**Status:** Completo e Testado
+**Data:** Maio 2026

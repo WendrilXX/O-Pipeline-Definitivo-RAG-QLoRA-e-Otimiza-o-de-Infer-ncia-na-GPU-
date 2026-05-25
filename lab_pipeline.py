@@ -6,7 +6,7 @@ Objetivo: Demonstrar como QLoRA (4-bit) + KV Cache + FlashAttention-2
 salvam um Transformer tradicional do colapso de VRAM ao processar contextos massivos.
 
 Partes deste laboratório foram geradas/complementadas com IA, 
-revisadas e validadas por [Seu Nome]
+revisadas e validadas por Wendril Gabriel
 """
 
 import torch
@@ -119,7 +119,7 @@ def load_model_qlora():
 # ============================================================================
 # PASSO 2: SIMULAÇÃO DO RAG MASSIVO (10-15K tokens)
 # ============================================================================
-def generate_rag_context():
+def generate_rag_context(tokenizer, target_min_tokens=10000, target_max_tokens=15000):
     """
     Gera contexto fictício simulando 5 capítulos de manual médico.
     
@@ -238,8 +238,18 @@ def generate_rag_context():
     10. Monitorização de hipertensão pulmonar com ecocardiografia se IC/cor pulmonale
     """
     
-    # Multiplicar para atingir ~10-15K tokens
-    combined_context = base_context * 4
+    # Ajustar tamanho para ficar entre 10K e 15K tokens
+    combined_context = base_context
+    token_count = tokenizer(combined_context, return_tensors="pt", truncation=False)["input_ids"].shape[1]
+    while token_count < target_min_tokens:
+        combined_context += base_context
+        token_count = tokenizer(combined_context, return_tensors="pt", truncation=False)["input_ids"].shape[1]
+
+    if token_count > target_max_tokens:
+        # Corta por tokens para manter o intervalo exigido
+        trimmed_ids = tokenizer(combined_context, return_tensors="pt", truncation=False)["input_ids"][0, :target_max_tokens]
+        combined_context = tokenizer.decode(trimmed_ids, skip_special_tokens=True)
+        token_count = tokenizer(combined_context, return_tensors="pt", truncation=False)["input_ids"].shape[1]
     
     print(f"[*] Contexto gerado com sucesso")
     print(f"[MÉTRICA] Tamanho do contexto: {len(combined_context)} caracteres")
@@ -255,17 +265,34 @@ def tokenize_context(tokenizer, context):
         dict: tokens do contexto com input_ids e attention_mask
     """
     print("[*] Tokenizando contexto...")
-    tokens = tokenizer(
+    tokens_full = tokenizer(
+        context,
+        return_tensors="pt",
+        truncation=False,
+    )
+    num_tokens = tokens_full["input_ids"].shape[1]
+
+    model_max_len = tokenizer.model_max_length
+    if model_max_len is None or model_max_len > 100000:
+        model_max_len = 16384
+
+    tokens_model = tokenizer(
         context,
         return_tensors="pt",
         truncation=True,
-        max_length=8192,
+        max_length=model_max_len,
     )
-    num_tokens = tokens["input_ids"].shape[1]
     print(f"[✓] Contexto tokenizado")
     print(f"[MÉTRICA] Número de tokens: {num_tokens}")
+    if num_tokens > model_max_len:
+        print(f"[INFO] Contexto truncado para {model_max_len} tokens na geração")
     
-    return tokens
+    return {
+        "full_tokens": tokens_full,
+        "model_tokens": tokens_model,
+        "num_tokens": num_tokens,
+        "model_max_len": model_max_len,
+    }
 
 
 # ============================================================================
@@ -286,8 +313,8 @@ def generate_without_cache(model, tokenizer, tokens, max_new_tokens=100):
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
     
-    input_ids = tokens["input_ids"].to(DEVICE)
-    attention_mask = tokens["attention_mask"].to(DEVICE)
+    input_ids = tokens["model_tokens"]["input_ids"].to(DEVICE)
+    attention_mask = tokens["model_tokens"]["attention_mask"].to(DEVICE)
     
     print(f"[*] Iniciando geração de {max_new_tokens} tokens...")
     print(f"[*] use_cache = {model.config.use_cache}")
@@ -405,8 +432,8 @@ def generate_with_cache(model, tokenizer, tokens, max_new_tokens=100):
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
     
-    input_ids = tokens["input_ids"].to(DEVICE)
-    attention_mask = tokens["attention_mask"].to(DEVICE)
+    input_ids = tokens["model_tokens"]["input_ids"].to(DEVICE)
+    attention_mask = tokens["model_tokens"]["attention_mask"].to(DEVICE)
     
     print(f"[*] Iniciando geração de {max_new_tokens} tokens...")
     print(f"[*] use_cache = {model.config.use_cache}")
@@ -499,7 +526,7 @@ if __name__ == "__main__":
     model_baseline, tokenizer_baseline, vram_model = load_model_qlora()
     
     # PASSO 2: Simular RAG massivo
-    rag_context = generate_rag_context()
+    rag_context = generate_rag_context(tokenizer_baseline)
     tokens = tokenize_context(tokenizer_baseline, rag_context)
     
     # PASSO 3: Geração SEM cache (baseline)
