@@ -11,7 +11,7 @@ Este laboratório demonstra como orquestrar um pipeline IA ponta-a-ponta em um c
 ### Contexto: O Desastre da HealthTech
 - **Problema:** Processamento de 30K tokens (RAG) + fine-tuning QLoRA resulta em OOM (Out-Of-Memory)
 - **Causa Raiz:** Complexidade O(n²) do Self-Attention recalcula Q, K, V a cada novo token gerado
-- **Solução:** Combinar quantização 4-bit + KV Cache + FlashAttention-2 para viabilizar inferência em GPU
+- **Solução:** Combinar quantização 4-bit + KV Cache + atenção otimizada (FlashAttention-2 quando disponível) para viabilizar inferência em GPU
 
 ---
 
@@ -34,29 +34,29 @@ Este laboratório demonstra como orquestrar um pipeline IA ponta-a-ponta em um c
    - Mede impacto da complexidade O(n²)
    - Documenta lentidão para benchmark
 
-4. **Otimizado (Com FlashAttention-2 + KV Cache)**
+4. **Otimizado (Com KV Cache + Atenção Otimizada)**
    - `use_cache = True` reutiliza K,V do passo anterior
-   - `attn_implementation="flash_attention_2"` usa SRAM da GPU
-   - Redução de 5-10x no tempo de inferência
+   - `attn_implementation="sdpa"` no ambiente atual (fallback por falta de `flash-attn`)
+   - Redução do recálculo redundante durante a geração
 
 ---
 
 ## Resultados de Benchmark
 
+**VRAM inicial no carregamento do modelo:** 4218.36 MB
+
 ### Métrica: Geração de 100 Tokens Adicionais
 
 | Aspecto | Baseline (cache=False) | Otimizado (cache=True + FA2) | Melhoria |
 |--------|----------------------|------------------------------|---------|
-| **Tempo Total** | 17.141s | 15.283s | **1.12x mais rápido** |
-| **Pico VRAM** | 6124.93 MB | 10415.22 MB | **-70.0% (aumentou)** |
-| **Throughput** | 5.83 tokens/s | 6.54 tokens/s | **+12.2%** |
+| **Tempo Total** | 4.778s | 4.890s | **0.98x mais rápido** |
+| **Pico VRAM** | 4684.70 MB | 8904.13 MB | **-90.1% (aumentou)** |
+| **Throughput** | 20.93 tokens/s | 20.45 tokens/s | **-2.3%** |
 | **Arquitetura** | Self-Attention tradicional | KV Cache + SDPA | Otimizado |
 
-> **Nota:** Métricas reais em GPU Tesla T4. Neste ambiente, `bitsandbytes` e `flash-attn` não estavam disponíveis, então o modelo foi carregado em fp32 e a atenção ficou em `sdpa`.
+> **Nota:** Métricas reais em GPU Tesla T4. Neste ambiente, `bitsandbytes` e `flash-attn` não estavam disponíveis, então o modelo foi carregado em fp32 e a atenção ficou em `sdpa`. O contexto foi gerado com 10.727 tokens e truncado para 2.048 tokens na geração por limite do modelo.
 
 ---
-
-
 
 ## Análise Técnica Profunda
 
@@ -85,10 +85,10 @@ python lab_pipeline.py
 ```
 
 ### Esperado
-- Modelo carrega em 4-bit
-- Geração baseline (~2-5s)
-- Geração otimizada (~0.3-0.8s)
-- Métricas comparativas impressas
+- Modelo carrega (fp32 quando `bitsandbytes` não estiver disponível)
+- Geração baseline ~4-5s (100 tokens)
+- Geração otimizada ~4-5s (100 tokens)
+- Métricas comparativas impressas (tempo, VRAM, throughput)
 
 ---
 
